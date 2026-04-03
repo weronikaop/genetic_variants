@@ -1,0 +1,1218 @@
+---
+title: "Plots of combined results"
+format: html
+editor: visual
+author: 
+- Weronika Oprzędek
+---
+
+# Set up
+
+```{r}
+out_dir <- "part2/graphs/facets"
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+library(tidyverse)
+library(ggplot2)
+library(rtracklayer)
+library(purrr)
+```
+
+# Evolutionary per-position/codon metrics
+
+## import data
+
+```{r}
+# Safe import function for phylo/score-based files
+safe_import <- function(path, colname){
+  # return empty structure if file does not exist
+  if(!file.exists(path)) return(data.frame(nt_position = integer(0), setNames(list(numeric(0)), colname)))
+  
+  # try importing file, return NULL on failure
+  obj <- tryCatch(import(path), error = function(e) return(NULL))
+  
+  # handle empty or failed import
+  if(is.null(obj) || length(obj) == 0) return(data.frame(nt_position = integer(0), setNames(list(numeric(0)), colname)))
+  
+  df <- as.data.frame(obj)
+  
+  # ensure expected column exists
+  if(!"score" %in% colnames(df)) return(data.frame(nt_position = integer(0), setNames(list(numeric(0)), colname)))
+  
+  # standardize format: position + score
+  df <- df %>% mutate(nt_position = start) %>% select(nt_position, score)
+  
+  # rename score column to requested name
+  colnames(df)[colnames(df) == "score"] <- colname
+  
+  return(df)
+}
+
+# gene groups used for aggregation across loci
+gene_groups <- c("TRBC","TRBD","TRBJ","TRBV","TRAC","TRAJ","TRAV",
+                 "IGHC","IGHD","IGHJ","IGHV","IGKC","IGKJ","IGKV",
+                 "IGLC","IGLJ","IGLV")
+
+# build final combined dataset across all gene groups
+final_all <- map_dfr(gene_groups, function(gen_group){
+
+  # 1. entropy and coverage per nucleotide position
+  entropy_df <- read_csv(paste0("data/coding_region/graphs/", gen_group, "_entropy_per_site.csv")) %>%
+    mutate(gen_group = gen_group,
+           nt_position = Position,
+           codon = ceiling(nt_position / 3)) %>%
+    select(gen_group, nt_position, codon, Entropy, Coverage)
+
+  # 2. dN/dS statistics at codon level
+  dnds_df <- read_csv(paste0("data/coding_region/dn_ds/dnds_", gen_group, ".csv")) %>%
+    mutate(
+      codon = Site,
+      dn_ds = as.numeric(`dN-dS`),
+      dn_ds_pval_up = as.numeric(`P [dN/dS > 1]`),
+      dn_ds_pval_down = as.numeric(`P [dN/dS < 1]`)
+    ) %>%
+    select(codon, dn_ds, dn_ds_pval_up, dn_ds_pval_down)
+
+  # 3. PhyloP acceleration scores + significance flag
+  phylop_acc_df <- safe_import(paste0("data/coding_region/phast/", gen_group, "_phyloP_acc.wig"), "phylop_acc") %>%
+    mutate(phylop_acc_signif = phylop_acc > 1.3)
+
+  # 4. PhyloP conservation scores + significance flag
+  phylop_con_df <- safe_import(paste0("data/coding_region/phast/", gen_group, "_phyloP_con.wig"), "phylop_con") %>%
+    mutate(phylop_con_signif = phylop_con > 1.3)
+
+  # 5. PhastCons conservation scores
+  phastcons_df <- safe_import(paste0("data/coding_region/phast/", gen_group, "_phastCons.wig"), "phastcons")
+
+  # 6. merge all signals into one per-gene table
+  final_df <- entropy_df %>%
+    left_join(dnds_df, by = "codon") %>%
+    left_join(phylop_acc_df, by = "nt_position") %>%
+    left_join(phylop_con_df, by = "nt_position") %>%
+    left_join(phastcons_df, by = "nt_position")
+
+  return(final_df)
+})
+```
+
+## coding sequences
+
+```{r}
+plot_metric_by_segment <- function(df,
+                                   metric,
+                                   output_dir = "plots",
+                                   n_bins = 100,
+                                   base_height = 1.5,
+                                   width = 16) {
+
+  # create output folder if it does not exist
+  if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+  # color mapping for loci
+  locus_colors <- c(
+    TRA = "#F8766D",
+    TRB = "#B79F00",
+    IGH = "#00BA38",
+    IGK = "#C77CFF",
+    IGL = "#619CFF"
+  )
+
+  # plot titles for each metric
+  metric_titles <- c(
+    Entropy   = "Sequence variability (Shannon entropy)",
+    phylop    = "Deviation from neutral evolution",
+    phastcons = "Evolutionary conservation",
+    dn_ds     = "Selective pressure (dN–dS)"
+  )
+
+  # axis labels per metric
+  metric_labels <- list(
+    Entropy = list(
+      x = "Relative gene position",
+      y = "Shannon entropy"
+    ),
+    phastcons = list(
+      x = "Relative gene position",
+      y = "Probability of evolutionary conservation"
+    ),
+    phylop = list(
+      x = "Relative gene position",
+      y = "Deviation from neutral evolution\nnegative = constraint, positive = acceleration"
+    ),
+    dn_ds = list(
+      x = "Relative codon position",
+      y = "Directional selection strength (dN–dS)"
+    )
+  )
+
+  # binning function for position-based metrics
+  prepare_binned <- function(df, value_col, coord_col = "nt_position") {
+    df %>%
+      filter(!is.na(.data[[value_col]])) %>%
+      group_by(segment, locus, gen_group) %>%
+      mutate(
+        # normalize position within gene
+        rel_pos = .data[[coord_col]] / max(.data[[coord_col]], na.rm = TRUE),
+        
+        # assign to fixed bins along gene length
+        bin = cut(rel_pos, breaks = seq(0,1,length.out = n_bins+1),
+                  include.lowest = TRUE, labels = FALSE)
+      ) %>%
+      ungroup() %>%
+      group_by(segment, locus, bin) %>%
+      summarise(
+        # central tendency and spread per bin
+        median   = median(.data[[value_col]], na.rm = TRUE),
+        q25      = quantile(.data[[value_col]], 0.25, na.rm = TRUE),
+        q75      = quantile(.data[[value_col]], 0.75, na.rm = TRUE),
+        
+        # fraction of significant values if available
+        sig_frac = if ("sig_frac" %in% colnames(df)) mean(sig_frac, na.rm = TRUE) else NA_real_,
+        .groups  = "drop"
+      ) %>%
+      mutate(rel_pos = (bin - 0.5)/n_bins)
+  }
+
+  # binning for PhyloP (separate acceleration and constraint signals)
+  prepare_phylop_binned <- function(df) {
+
+    # acceleration signal
+    acc <- df %>%
+      filter(!is.na(phylop_acc)) %>%
+      group_by(segment, locus, gen_group) %>%
+      mutate(
+        rel_pos = nt_position/max(nt_position, na.rm=TRUE),
+        bin = cut(rel_pos, seq(0,1,length.out = n_bins+1),
+                  include.lowest = TRUE, labels=FALSE)
+      ) %>%
+      ungroup() %>%
+      group_by(segment, locus, bin) %>%
+      summarise(
+        median = median(phylop_acc, na.rm=TRUE),
+        q25 = quantile(phylop_acc,0.25,na.rm=TRUE),
+        q75 = quantile(phylop_acc,0.75,na.rm=TRUE),
+        sig_frac = mean(phylop_acc_signif, na.rm=TRUE),
+        .groups="drop"
+      ) %>%
+      mutate(rel_pos=(bin-0.5)/n_bins, type="Acceleration")
+
+    # constraint signal
+    con <- df %>%
+      filter(!is.na(phylop_con)) %>%
+      group_by(segment, locus, gen_group) %>%
+      mutate(
+        rel_pos = nt_position/max(nt_position, na.rm=TRUE),
+        bin = cut(rel_pos, seq(0,1,length.out = n_bins+1),
+                  include.lowest = TRUE, labels=FALSE)
+      ) %>%
+      ungroup() %>%
+      group_by(segment, locus, bin) %>%
+      summarise(
+        median = median(phylop_con, na.rm=TRUE),
+        q25 = quantile(phylop_con,0.25,na.rm=TRUE),
+        q75 = quantile(phylop_con,0.75,na.rm=TRUE),
+        sig_frac = mean(phylop_con_signif, na.rm=TRUE),
+        .groups="drop"
+      ) %>%
+      mutate(rel_pos=(bin-0.5)/n_bins, type="Constraint")
+
+    bind_rows(acc, con)
+  }
+
+  # binning for dN/dS values at codon level
+  prepare_dnds_binned <- function(df) {
+    df %>%
+      filter(!is.na(dn_ds)) %>%
+      group_by(segment, locus, gen_group) %>%
+      mutate(
+        rel_pos = codon/max(codon, na.rm=TRUE),
+        bin = cut(rel_pos, seq(0,1,length.out=n_bins+1),
+                  include.lowest=TRUE, labels=FALSE)
+      ) %>%
+      ungroup() %>%
+      group_by(segment, locus, bin) %>%
+      summarise(
+        median = median(dn_ds, na.rm=TRUE),
+        q25 = quantile(dn_ds,0.25,na.rm=TRUE),
+        q75 = quantile(dn_ds,0.75,na.rm=TRUE),
+        
+        # proportion of bins with significant selection signal
+        sig_frac = mean(dn_ds_pval_up < 0.05 | dn_ds_pval_down < 0.05, na.rm=TRUE),
+        .groups="drop"
+      ) %>%
+      mutate(rel_pos=(bin-0.5)/n_bins)
+  }
+
+  # main plotting function
+  make_plot <- function(agg, facet=FALSE) {
+
+    # special handling for PhyloP (two directional signals)
+    if (metric == "phylop") {
+      agg <- agg %>%
+        mutate(
+          signed_median = ifelse(type == "Acceleration", median, -median),
+          ymin = ifelse(type == "Acceleration", q25, -q75),
+          ymax = ifelse(type == "Acceleration", q75, -q25)
+        )
+
+      p <- ggplot(
+        agg,
+        aes(rel_pos, signed_median,
+            color = locus,
+            group = interaction(locus, type))
+      ) +
+        geom_ribbon(
+          aes(ymin = ymin, ymax = ymax, fill = locus),
+          alpha = 0.15,
+          color = NA
+        ) +
+        geom_line(linewidth = 0.7) +
+        geom_point(
+          aes(shape = type, size = sig_frac),
+          alpha = 0.7
+        ) +
+        scale_shape_manual(
+          name = "Evolutionary signal",
+          values = c(Acceleration = 16, Constraint = 15)
+        ) +
+        scale_size_continuous(
+          name = "Fraction significant",
+          range = c(1, 3)
+        ) +
+        geom_hline(yintercept = 0, linetype = "dashed", color = "grey50")
+
+    } else {
+
+      # default plotting for entropy, phastcons, dn/ds
+      y_val <- ifelse(metric=="dn_ds","log_dn_ds","median")
+      ribbon_ymin <- ifelse(metric=="dn_ds","log_q25","q25")
+      ribbon_ymax <- ifelse(metric=="dn_ds","log_q75","q75")
+
+      p <- ggplot(agg, aes(rel_pos, .data[[y_val]], color=locus, fill=locus)) +
+        geom_ribbon(aes(ymin=.data[[ribbon_ymin]], ymax=.data[[ribbon_ymax]]),
+                    alpha=0.15, color=NA) +
+        geom_line(linewidth=0.7)
+
+      # add significance overlay if present
+      if ("sig_frac" %in% colnames(agg)) {
+        p <- p + geom_point(aes(size=sig_frac), alpha=0.6) +
+          scale_size_continuous(name="Fraction significant", range=c(1,3))
+      }
+    }
+
+    # shared styling
+    p <- p +
+      scale_x_continuous(limits = c(0, 1), expand = c(0, 0)) +
+      scale_color_manual(
+        name = "Locus",
+        values = locus_colors,
+        guide = guide_legend(
+          override.aes = list(
+            shape = NA,
+            linetype = 1,
+            linewidth = 1
+          )
+        )
+      ) +
+      scale_fill_manual(name="Locus", values=locus_colors) +
+      labs(
+        x = metric_labels[[metric]]$x,
+        y = metric_labels[[metric]]$y
+      ) +
+      theme_bw() +
+      theme(
+        legend.position = "bottom",
+        plot.title = element_text(face="bold"),
+        strip.background = element_blank(),
+        strip.text = element_text(face="bold")
+      )
+
+    if (facet) p <- p + facet_wrap(~segment, ncol=1, scales="free_y")
+    p
+  }
+
+  plots <- list()
+
+  # generate per-segment plots
+  for (seg in unique(df$segment)) {
+    df_seg <- df %>% filter(segment==seg)
+
+    agg <- switch(metric,
+                  "Entropy"   = prepare_binned(df_seg, "Entropy"),
+                  "phastcons" = prepare_binned(df_seg, "phastcons"),
+                  "phylop"    = prepare_phylop_binned(df_seg),
+                  "dn_ds"     = prepare_dnds_binned(df_seg))
+
+    if (nrow(agg)==0) next
+
+    # transform phylop values for visualization stability
+    if (metric=="phylop") {
+      agg <- agg %>% mutate(
+        signed_value = ifelse(type=="Acceleration",median,-median),
+        ymin = ifelse(type=="Acceleration",q25,-q75),
+        ymax = ifelse(type=="Acceleration",q75,-q25)
+      )
+    }
+
+    # log transform for dn/ds for better scaling
+    if (metric=="dn_ds") {
+      agg <- agg %>% mutate(
+        log_dn_ds = sign(median)*log10(abs(median)+1),
+        log_q25 = sign(q25)*log10(abs(q25)+1),
+        log_q75 = sign(q75)*log10(abs(q75)+1)
+      )
+    }
+
+    height_plot <- base_height * 1.5
+
+    p <- make_plot(agg, facet=FALSE) +
+      labs(title=paste(metric_titles[[metric]], "-", seg, "segments"))
+
+    plots[[seg]] <- p
+  }
+
+  # combined dataset across all segments
+  agg_all <- switch(metric,
+                    "Entropy"   = prepare_binned(df, "Entropy"),
+                    "phastcons" = prepare_binned(df, "phastcons"),
+                    "phylop"    = prepare_phylop_binned(df),
+                    "dn_ds"     = prepare_dnds_binned(df))
+
+  # same transformations for full dataset
+  if (metric=="phylop") {
+    agg_all <- agg_all %>% mutate(
+      signed_value = ifelse(type=="Acceleration",median,-median),
+      ymin = ifelse(type=="Acceleration",q25,-q75),
+      ymax = ifelse(type=="Acceleration",q75,-q25)
+    )
+  }
+
+  if (metric=="dn_ds") {
+    agg_all <- agg_all %>% mutate(
+      log_dn_ds = sign(median)*log10(abs(median)+1),
+      log_q25 = sign(q25)*log10(abs(q25)+1),
+      log_q75 = sign(q75)*log10(abs(q75)+1)
+    )
+  }
+
+  # faceted plot across all segments
+  n_seg <- length(unique(agg_all$segment))
+  p_faceted <- make_plot(agg_all, facet=TRUE) +
+    labs(title=paste(metric_titles[[metric]], "across gene segments"))
+
+  # save faceted plot
+  ggsave(file.path(output_dir, paste0(metric_titles[[metric]], "_ALL_faceted.png")),
+         p_faceted,
+         width=width,
+         height=base_height * n_seg * 1.5)
+
+  plots[["FACETED"]] <- p_faceted
+
+  return(plots)
+}
+
+annotate_segments <- function(df) { 
+  # Derive gene segment (V/D/J/C) and locus (TRA/TRB/IGH/IGK/IGL) 
+  # from the gene group identifier 
+  df %>% 
+    mutate( segment = case_when( 
+      grepl("V$", gen_group) ~ "V", 
+      grepl("D$", gen_group) ~ "D", 
+      grepl("J$", gen_group) ~ "J", 
+      grepl("C$", gen_group) ~ "C", 
+      TRUE ~ NA_character_ ), 
+      locus = case_when( 
+        grepl("^TRA", gen_group) ~ "TRA", 
+        grepl("^TRB", gen_group) ~ "TRB", 
+        grepl("^IGH", gen_group) ~ "IGH", 
+        grepl("^IGK", gen_group) ~ "IGK", 
+        grepl("^IGL", gen_group) ~ "IGL", 
+        TRUE ~ NA_character_ )
+    ) 
+  }
+
+# Annotate input table with segment and locus information
+final_all <- annotate_segments(final_all)
+
+# Generate entropy plots
+entropy_plots <- plot_metric_by_segment(
+  final_all,
+  "Entropy",
+  output_dir = out_dir
+)
+
+# Generate PhyloP plots
+phylop_plots <- plot_metric_by_segment(
+  final_all,
+  "phylop",
+  output_dir = out_dir
+)
+
+# Generate PhastCons plots
+phastcons_plots <- plot_metric_by_segment(
+  final_all,
+  "phastcons",
+  output_dir = out_dir
+)
+
+# Generate dN-dS plots
+dnds_plots <- plot_metric_by_segment(
+  final_all,
+  "dn_ds",
+  output_dir = out_dir
+)
+```
+
+## regulatory sequences
+
+```{r}
+# Map each detailed subtype to a main type category
+subtype_map <- c(
+  "3d_rss"     = "RSS",
+  "5d_rss"     = "RSS",
+  "v_rss"      = "RSS",
+  "j_rss"      = "RSS",
+  "c_intron"   = "Intron",
+  "jc_intron"  = "Intron",
+  "l_intron"   = "Intron",
+  "v_intron"   = "Intron",
+  "c_upstream" = "Upstream",
+  "d_upstream" = "Upstream",
+  "j_upstream" = "Upstream",
+  "v_upstream" = "Upstream"
+)
+
+subtype_labels <- c(
+  "3d_rss"     = "3′ D RSS",
+  "5d_rss"     = "5′ D RSS",
+  "v_rss"      = "V RSS",
+  "j_rss"      = "J RSS",
+  "c_intron"   = "C intron",
+  "jc_intron"  = "J–C intron",
+  "l_intron"   = "Leader intron",
+  "v_intron"   = "V intron",
+  "c_upstream" = "C upstream",
+  "d_upstream" = "D upstream",
+  "j_upstream" = "J upstream",
+  "v_upstream" = "V upstream"
+)
+
+# Define color palettes for each main type
+palette_rss      <- RColorBrewer::brewer.pal(4, "Set1")
+palette_intron   <- RColorBrewer::brewer.pal(4, "Set2")
+palette_upstream <- RColorBrewer::brewer.pal(4, "Dark2")
+
+# Assign a specific color to each subtype
+colors <- c(
+  "3d_rss"     = palette_rss[1],
+  "5d_rss"     = palette_rss[2],
+  "v_rss"      = palette_rss[3],
+  "j_rss"      = palette_rss[4],
+  "c_intron"   = palette_intron[1],
+  "jc_intron"  = palette_intron[2],
+  "l_intron"   = palette_intron[3],
+  "v_intron"   = palette_intron[4],
+  "c_upstream" = palette_upstream[1],
+  "d_upstream" = palette_upstream[2],
+  "j_upstream" = palette_upstream[3],
+  "v_upstream" = palette_upstream[4]
+)
+
+# Function to read IQ-TREE rate files
+read_iqtree_rates <- function(base_dir) {
+
+  # List all rate files recursively in the base directory
+  files <- list.files(
+    base_dir,
+    pattern = "iqtree_results\\.rate$",
+    recursive = TRUE,
+    full.names = TRUE
+  )
+
+  # Read each file and annotate with subtype and main type
+  purrr::map_dfr(files, function(f) {
+
+    folder <- basename(dirname(f))  # folder name indicates subtype
+    source <- folder                # save subtype as 'source'
+
+    # Determine main type (RSS/Intron/Upstream/Splice) from folder name
+    regulator <- case_when(
+      str_detect(folder, "rss")      ~ "RSS",
+      str_detect(folder, "intron")   ~ "Intron",
+      str_detect(folder, "upstream") ~ "Upstream",
+      str_detect(folder, "splice")   ~ "Splice",
+      TRUE ~ NA_character_
+    )
+
+    # Read the rate file
+    readr::read_tsv(
+      f,
+      comment = "#",
+      col_types = cols(
+        Site   = col_double(),
+        Rate   = col_double(),
+        Cat    = col_integer(),
+        C_Rate = col_double()
+      ),
+      show_col_types = FALSE
+    ) %>%
+      # Annotate each row with subtype and main type
+      mutate(
+        source    = source,
+        regulator = regulator
+      )
+  })
+}
+
+# Function to bin rates along the normalized alignment
+prepare_iqtree_binned <- function(df, n_bins = 100) {
+
+  df %>%
+    dplyr::group_by(regulator, source) %>%
+    dplyr::mutate(
+      rel_pos = Site / max(Site, na.rm = TRUE),
+      bin = cut(
+        rel_pos,
+        breaks = seq(0, 1, length.out = n_bins + 1),
+        include.lowest = TRUE,
+        labels = FALSE
+      )
+    ) %>%
+    dplyr::ungroup() %>%
+    dplyr::group_by(regulator, source, bin) %>%
+    dplyr::summarise(
+      median = median(Rate, na.rm = TRUE),
+      q25    = quantile(Rate, 0.25, na.rm = TRUE),
+      q75    = quantile(Rate, 0.75, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(rel_pos = (bin - 0.5) / n_bins)
+}
+
+# Function to plot binned IQ-TREE rates with split legends
+plot_iqtree <- function(df, n_bins = 100) {
+
+  #subtype-level (color + ribbon)
+  agg_subtype <- prepare_iqtree_binned(df, n_bins) %>%
+    dplyr::mutate(
+      subtype   = source,
+      main_type = subtype_map[subtype]
+    ) %>%
+    dplyr::filter(!is.na(main_type)) %>%
+    dplyr::mutate(
+      main_type = factor(main_type, levels = c("RSS", "Intron", "Upstream"))
+    )
+
+  agg_main <- agg_subtype %>%
+    dplyr::group_by(regulator, main_type, rel_pos) %>%
+    dplyr::summarise(
+      median = median(median, na.rm = TRUE),
+      .groups = "drop"
+    )
+  ggplot() +
+    #ribbon: SUBTYPES
+    geom_ribbon(
+      data = agg_subtype,
+      aes(
+        x = rel_pos,
+        ymin = q25,
+        ymax = q75,
+        fill = subtype,
+        group = subtype
+      ),
+      alpha = 0.15,
+      color = NA
+    ) +
+    #thin colored lines: SUBTYPES
+    geom_line(
+      data = agg_subtype,
+      aes(
+        x = rel_pos,
+        y = median,
+        color = subtype,
+        group = subtype
+      ),
+      linewidth = 0.7,
+      alpha = 0.9
+    ) +
+    facet_wrap(~ regulator, ncol = 1, scales = "free_y") +
+    scale_color_manual(
+      name   = "Subtype",
+      values = colors,
+      labels = subtype_labels
+    ) +
+    scale_fill_manual(
+      name   = "Subtype",
+      values = colors,
+      labels = subtype_labels
+    ) +
+    labs(
+      title = "Substitution rates in regulatory regions",
+      x = "Relative alignment position",
+      y = "Site-specific substitution rate"
+    ) +
+
+    theme_bw() +
+    theme(
+      legend.position = "right",
+      strip.text = element_text(face = "bold"),
+      plot.title = element_text(face = "bold"),
+      panel.grid.minor = element_blank(),
+      strip.background = element_blank()
+    )+
+    scale_x_continuous(limits = c(0, 1), expand = c(0, 0))
+}
+
+# Main execution
+base_dir <- "C:/Users/weronikaoprzedek/Desktop/projekt/data/noncoding/iqtree"
+
+# Read all rate files and exclude 'Splice'
+df_rates <- read_iqtree_rates(base_dir) %>%
+  filter(regulator != "Splice")
+
+# Generate the plot
+p <- plot_iqtree(df_rates, 300)
+print(p)
+# Save the plot as SVG
+ggsave(
+  file.path(out_dir, "iqtree_rates.png"),
+  p,
+  width  = 16,
+  height = 2 * length(unique(df_rates$regulator)),
+  dpi = 300
+)
+```
+
+#### entropy
+
+```{r}
+#analogous function to coding
+plot_entropy_regulatory <- function(df, colors, output_dir = "plots",
+                                    n_bins = 100, base_height = 2, width = 12) {
+
+  if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+  #Binning
+  df_binned <- df %>%
+    dplyr::group_by(main_type, subtype) %>%
+    dplyr::mutate(
+      rel_pos = nt_position / max(nt_position, na.rm = TRUE),
+      bin = cut(
+        rel_pos,
+        breaks = seq(0, 1, length.out = n_bins + 1),
+        include.lowest = TRUE,
+        labels = FALSE
+      )
+    ) %>%
+    dplyr::ungroup() %>%
+    dplyr::group_by(main_type, subtype, bin) %>%
+    dplyr::summarise(
+      median = median(Entropy, na.rm = TRUE),
+      q25    = quantile(Entropy, 0.25, na.rm = TRUE),
+      q75    = quantile(Entropy, 0.75, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(rel_pos = (bin - 0.5) / n_bins)
+
+  p <- ggplot() +
+    #ribbon
+    geom_ribbon(
+      data = df_binned,
+      aes(
+        x = rel_pos,
+        ymin = q25,
+        ymax = q75,
+        fill = subtype,
+        group = subtype
+      ),
+      alpha = 0.15,
+      color = NA
+    ) +
+    #thin colored lines
+    geom_line(
+      data = df_binned,
+      aes(
+        x = rel_pos,
+        y = median,
+        color = subtype,
+        group = subtype
+      ),
+      linewidth = 0.7,
+      alpha = 0.9
+    ) +
+    #thick black line averaged -> removed
+    stat_summary(
+      data = df_binned,
+      aes(
+        x = rel_pos,
+        y = median,
+        group = main_type
+      ),
+      fun = median,
+      geom = "line",
+      linewidth = 1,
+      color = "black"
+    ) +
+    facet_wrap(~ main_type, ncol = 1, scales = "free_y") +
+    scale_color_manual(
+      name = "Subtype",
+      values = colors,
+      breaks = names(colors)
+    ) +
+    scale_fill_manual(
+      name = "Subtype",
+      values = colors,
+      breaks = names(colors)
+    ) +
+    labs(
+      title = "Shannon entropy in regulatory regions",
+      subtitle = "Subtype medians ± IQR; black line = main region trend",
+      x = "Relative alignment position",
+      y = "Shannon entropy"
+    ) +
+    theme_bw() +
+    theme(
+      legend.position = "right",
+      plot.title = element_text(face = "bold"),
+      strip.text = element_text(face = "bold"),
+      panel.grid.minor = element_blank(),
+      strip.background = element_blank()
+    )
+
+  #save
+  ggsave(
+    file.path(output_dir, "entropy_regulatory.png"),
+    p,
+    width  = width,
+    height = base_height * length(unique(df_binned$main_type)),
+    dpi = 300
+  )
+
+  return(p)
+}
+
+#run
+base_dir <- "C:/Users/weronikaoprzedek/Desktop/projekt/data/noncoding/graphs"
+
+# get all files *_entropy_per_site.csv
+files <- list.files(base_dir, pattern = "_entropy_per_site\\.csv$", full.names = TRUE)
+
+# read files
+entropy_df_reg <- map_dfr(files, function(f) {
+  
+  # get subtype from file name
+  file_name <- basename(f)
+  subtype <- str_replace(file_name, "_entropy_per_site\\.csv", "")
+  
+  # skip if subtype name not in map
+  if (!subtype %in% names(subtype_map)) {
+    message("Skipped file (unknown subtype): ", f)
+    return(NULL)
+  }
+  
+  main_type <- subtype_map[subtype]
+  
+  # read CSV
+  df <- read_csv(f, show_col_types = FALSE) %>%
+    mutate(
+      gen_group = subtype,
+      nt_position = Position,
+      codon = ceiling(nt_position / 3),
+      subtype = subtype,
+      main_type = main_type
+    ) %>%
+    select(gen_group, nt_position, codon, Entropy, Coverage, subtype, main_type)
+  
+  return(df)
+})
+
+p_entropy_reg <- plot_entropy_regulatory(
+  entropy_df_reg,
+  colors = colors,
+  output_dir = out_dir
+)
+```
+
+# Variants distribution
+
+## summary plots
+
+```{r}
+# Compute lengths in kilobases
+locus_lengths <- tibble(
+  Gene = c("IGH", "IGK", "IGL", "TRA", "TRB"),
+  start = c(99839969, 88866370, 22439629, 15819498, 143614080),
+  end   = c(101155136, 90790947, 23345823, 16749884, 144169005)
+) %>%
+  mutate(length_mb = (end - start + 1) / 1e6)
+
+
+# Function to read all variant summary RDS files for a given class and data type
+read_variant_data <- function(base_dir, variant_class, data_type) {
+  # Build pattern to match files like "_snv_summary_type_data.rds"
+  pattern <- paste0("_", variant_class, "_summary_", data_type, "_data\\.rds$")
+  
+  # List all matching files recursively and read them into a single data frame
+  list.files(
+    base_dir,
+    pattern = pattern,
+    recursive = TRUE,
+    full.names = TRUE
+  ) %>%
+    map_dfr(readRDS)
+}
+
+base_dir <- "part2/graphs"
+
+# Read SNV, INDEL, SV summary tables by type and region
+snv_types   <- read_variant_data(base_dir, "snv", "type")
+snv_regions <- read_variant_data(base_dir, "snv", "region")
+indel_types   <- read_variant_data(base_dir, "indel", "type")
+indel_regions <- read_variant_data(base_dir, "indel", "region")
+sv_types   <- read_variant_data(base_dir, "sv", "type")
+sv_regions <- read_variant_data(base_dir, "sv", "region")
+
+# Read "focus" (non-modifier) variants
+snv_types_focus   <- read_variant_data(base_dir, "snv", "focus_type")
+snv_regions_focus <- read_variant_data(base_dir, "snv", "focus_region")
+indel_types_focus   <- read_variant_data(base_dir, "indel", "focus_type")
+indel_regions_focus <- read_variant_data(base_dir, "indel", "focus_region")
+sv_types_focus   <- read_variant_data(base_dir, "sv", "focus_type")
+sv_regions_focus <- read_variant_data(base_dir, "sv", "focus_region")
+
+# Define gene and region factor levels
+gene_levels   <- c("TRA", "TRB", "IGH", "IGK", "IGL")
+region_levels <- c("AFR", "AMR", "EAS", "EUR", "SAS")
+
+# Assign colors to each locus for consistent plotting
+locus_colors <- c(
+  TRA = "#F8766D",
+  TRB = "#B79F00",
+  IGH = "#00BA38",
+  IGK = "#C77CFF",
+  IGL = "#619CFF"
+)
+
+# Convert gene/region columns to factors with consistent ordering
+snv_types <- snv_types %>% mutate(Gene = factor(Gene, levels = gene_levels))
+indel_types <- indel_types %>% mutate(Gene = factor(Gene, levels = gene_levels))
+sv_types <- sv_types %>% mutate(Gene = factor(Gene, levels = gene_levels))
+snv_types_focus <- snv_types_focus %>% mutate(Gene = factor(Gene, levels = gene_levels))
+indel_types_focus <- indel_types_focus %>% mutate(Gene = factor(Gene, levels = gene_levels))
+sv_types_focus <- sv_types_focus %>% mutate(Gene = factor(Gene, levels = gene_levels))
+
+snv_regions <- snv_regions %>% mutate(Region = factor(Region, levels = region_levels))
+indel_regions <- indel_regions %>% mutate(Region = factor(Region, levels = region_levels))
+sv_regions <- sv_regions %>% mutate(Region = factor(Region, levels = region_levels))
+
+# Function to plot variant counts per gene, faceted by variant type
+plot_variant_type <- function(df, title, locus_colors) {
+  df <- df %>%
+    left_join(locus_lengths, by = "Gene") %>%
+    mutate(n_per_mb = n / length_mb)
+
+  ggplot(df, aes(x = Gene, y = n_per_mb, fill = Gene)) +
+    geom_col(width = 0.7) +
+    facet_wrap(~ Variant_Type, scales = "free_y", ncol = 8) +
+    scale_fill_manual(values = locus_colors) +
+    labs(
+      title = title,
+      x = "Locus",
+      y = "Variants per Mb"
+    ) +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "none",
+      plot.title = element_text(face = "bold"),
+      strip.background = element_blank(),
+      strip.text = element_text(face = "bold")
+    )
+}
+
+
+# Function to plot mean variants per sample by region, faceted by variant type
+plot_region_profile <- function(df, title, locus_colors, normalize_by_length = TRUE) {
+  if (normalize_by_length) {
+    df <- df %>%
+      left_join(locus_lengths, by = "Gene") %>%
+      mutate(mean_mut_per_mb = mean_mut / length_mb)
+    
+    y_col <- "mean_mut_per_mb"
+    y_label <- "Mean variants per Mb per sample"
+    
+  } else {
+    y_col <- "mean_mut"
+    y_label <- "Mean variants per sample"
+  }
+  
+  ggplot(df, aes(x = Region, y = .data[[y_col]], color = Gene)) +
+    geom_point(
+      position = position_jitter(width = 0.15, height = 0),
+      size = 2.5,
+      alpha = 0.8
+    ) +
+    facet_wrap(~ Variant_Type, scales = "free_y", ncol = 8) +
+    scale_y_continuous(limits = c(0, NA)) +
+    scale_color_manual(values = locus_colors) +
+    labs(
+      title = title,
+      x = "Region",
+      y = y_label,
+      color = "Locus"
+    ) +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      strip.text = element_text(face = "bold"),
+      plot.title = element_text(face = "bold"),
+      strip.background = element_blank(),
+      legend.position = "top",
+      legend.direction = "horizontal",
+      legend.title = element_text(face = "bold"),
+      legend.box = "horizontal",
+      axis.text.y = element_text(size = 7)
+    )
+}
+
+variant_sets <- list(
+  SNV = list(
+    types   = snv_types,
+    regions = snv_regions
+  ),
+  INDEL = list(
+    types   = indel_types,
+    regions = indel_regions
+  ),
+  SV = list(
+    types   = sv_types,
+    regions = sv_regions
+  )
+)
+
+for (v in names(variant_sets)) {
+
+  # Set figure height depending on variant class
+  fig_height <- if (v == "SNV") 3 else 3
+
+  # Variant type distribution
+  p1 <- plot_variant_type(
+    variant_sets[[v]]$types,
+    paste(v, "variant type distribution"),
+    locus_colors
+  )
+
+  ggsave(
+    file.path(out_dir, paste0(v, "_variant_types.png")),
+    p1,
+    width = 16,
+    height = fig_height,
+    dpi = 300
+  )
+
+  # Regional mutation burden
+  p2 <- plot_region_profile(
+    variant_sets[[v]]$regions,
+    paste(v, ": variant type distribution across loci and populations"),
+    locus_colors
+  )
+
+  ggsave(
+    file.path(out_dir, paste0(v, "_region_profiles.png")),
+    p2,
+    width = 16.5,
+    height = fig_height + 0.5,
+    dpi = 300
+  )
+}
+```
+
+## combined - region plot
+
+```{r}
+library(patchwork)
+
+plot_region_profile <- function(df, subtitle, locus_colors,
+                                normalize_by_length = TRUE,
+                                show_legend = FALSE,
+                                show_y = TRUE,
+                                show_x = TRUE) {
+
+  if (normalize_by_length) {
+    df <- df %>%
+      left_join(locus_lengths, by = "Gene") %>%
+      mutate(mean_mut_per_mb = mean_mut / length_mb)
+
+    y_col <- "mean_mut_per_mb"
+    y_label <- "Mean variants per Mb per sample"
+
+  } else {
+    y_col <- "mean_mut"
+    y_label <- "Mean variants per sample"
+  }
+
+  p <- ggplot(df, aes(x = Region, y = .data[[y_col]], color = Gene)) +
+    geom_point(
+      position = position_jitter(width = 0.15, height = 0),
+      size = 2.5,
+      alpha = 0.8
+    ) +
+    facet_wrap(~ Variant_Type, scales = "free_y", ncol = 8) +
+    scale_y_continuous(limits = c(0, NA)) +
+    scale_color_manual(values = locus_colors) +
+    labs(
+      subtitle = subtitle,
+      x = if (show_x) "Region" else NULL,
+      y = if (show_y) y_label else NULL,
+      color = "Locus"
+    ) +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      strip.text = element_text(face = "bold", size = 8),
+      strip.background = element_blank(),
+      legend.position = if (show_legend) "top" else "none",
+      legend.direction = "horizontal",
+      legend.title = element_text(face = "bold"),
+      legend.box = "horizontal",
+      axis.text.y = element_text(size = 8),
+      plot.subtitle = element_text(face = "bold", size = 10),
+      plot.margin = margin(5, 5, 5, 5)
+    )
+
+  return(p)
+}
+
+# Create individual plots
+p_snv <- plot_region_profile(
+  snv_regions,
+  "SNV",
+  locus_colors,
+  show_legend = TRUE,
+  show_y = FALSE,
+  show_x = FALSE
+)
+
+p_indel <- plot_region_profile(
+  indel_regions,
+  "INDEL",
+  locus_colors,
+  show_legend = FALSE,
+  show_y = TRUE,
+  show_x = FALSE
+)
+
+p_sv <- plot_region_profile(
+  sv_regions,
+  "SV",
+  locus_colors,
+  show_legend = FALSE,
+  show_y = FALSE,
+  show_x = TRUE
+)
+
+combined_plot <-
+  (p_snv / p_indel / p_sv) +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+
+final_plot <-
+  combined_plot +
+  plot_annotation(
+    title = "Variant burden across loci and populations",
+    theme = theme(
+      plot.title = element_text(face = "bold", size = 14, hjust = 0.5)
+    )
+  )
+
+ggsave(
+  file.path(out_dir, "combined_regions.png"),
+  final_plot,
+  width = 16,
+  height = 9,
+  dpi = 300
+)
+```
+
+# Correlation of haplotype frequency profiles
+
+```{r}
+input_dir <- "part2"
+in_tbl_dir <- file.path(input_dir, "tables")
+
+# loci to iterate over
+loci <- c("TRB", "TRA", "IGH", "IGK", "IGL")
+
+# read all correlation matrices and convert to long format
+correlations_long <- map_dfr(loci, function(locus) {
+
+  read_csv(
+    file.path(in_tbl_dir, paste0(locus, "_correlation.csv")),
+    show_col_types = FALSE
+  ) %>%
+    rename_with(~ "row_pop", .cols = 1) %>%   # ensure first column is population name
+    pivot_longer(
+      cols = -row_pop,
+      names_to = "col_pop",
+      values_to = "rho"
+    ) %>%
+    mutate(locus = locus)
+})
+
+# remove self-correlations and standardize population pairs
+correlations_long <- correlations_long %>%
+  filter(row_pop != col_pop) %>%
+  mutate(
+    # create order-independent population pair key
+    pair = map2_chr(row_pop, col_pop, ~ paste(sort(c(.x, .y)), collapse = "–"))
+  ) %>%
+  distinct(locus, pair, .keep_all = TRUE)
+```
+
+```{r}
+# compute mean correlation per population pair (across loci entries)
+correlations_long <- correlations_long %>%
+  group_by(pair) %>%
+  mutate(pair_mean = mean(rho, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(
+    # reorder pairs by overall mean correlation for better plot structure
+    pair = reorder(pair, pair_mean)
+  )
+
+# consistent color palette for loci
+locus_colors <- c(
+  TRA = "#F8766D",
+  TRB = "#B79F00",
+  IGH = "#00BA38",
+  IGK = "#C77CFF",
+  IGL = "#619CFF"
+)
+
+# main plot: correlations across population pairs and loci
+p <- ggplot(correlations_long,
+       aes(x = pair, y = rho, color = locus)) +
+  geom_point(size = 2.7, alpha = 0.85) +
+  facet_wrap(~ locus, nrow = 1) +
+  coord_flip() +
+  scale_color_manual(values = locus_colors, guide = "none") +
+  theme_bw() +
+  labs(
+    x = "Population pair",
+    y = "Spearman correlation of haplotype frequency profiles",
+    title = "Similarity of immune receptor haplotype composition across populations"
+  ) +
+  theme(
+    strip.text = element_text(face = "bold"),
+    strip.background = element_blank()
+  )
+
+# save figure to file
+ggsave(
+  file.path(out_dir, "correlations.png"),
+  p,
+  height = 4,
+  width = 7,
+  dpi = 300
+)
+```
