@@ -1,0 +1,21 @@
+##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##fileDate=20251212
+##source=Simulated
+##reference=file://hs1.fa.gz
+##note=These are simulated, fake variants for demonstration purposes only
+##contig=<ID=7,length=160567428>
+##INFO=<ID=ID,Number=A,Type=String,Description="ID of merged variant set">
+##INFO=<ID=VARTYPE,Number=A,Type=String,Description="Variant class">
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Variant type">
+##INFO=<ID=SVLEN,Number=1,Type=Integer,Description="Difference in length of ref and alt alleles">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##INFO=<ID=CSQ,Number=.,Type=String,Description="Consequence annotations from Ensembl VEP. Format: Allele|Consequence|IMPACT|SYMBOL|Gene|Feature_type|Feature|BIOTYPE|EXON|INTRON|HGVSc|HGVSp|cDNA_position|CDS_position|Protein_position|Amino_acids|Codons|Existing_variation|DISTANCE|STRAND|FLAGS|SYMBOL_SOURCE|HGNC_ID|SOURCE|chm13v2.0_RefSeq_Liftoff_v5.2.nochr.tab.gff3.bgz">
+##INFO=<ID=chm13v2.0_RefSeq_Liftoff_v5.2.nochr.tab.gff3.bgz,Number=.,Type=String,Description="[PATH]/chm13v2.0_RefSeq_Liftoff_v5.2.nochr.tab.gff3.bgz">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	S1	S2	S3	S4	S5
+7	143614050	chr7-143614051-DEL-5	AAGTA	A	.	.	ID=chr7-143614051-DEL-5;VARTYPE=INDEL;SVTYPE=DEL;SVLEN=-5;CSQ=-|upstream_gene_variant|MODIFIER|TRBV1|TRBV1|Transcript|unassigned_transcript_1324|V_gene_segment|||||||||||26|1||||chm13v2.0_RefSeq_Liftoff_v5.2.nochr.tab.gff3.bgz|,-|upstream_gene_variant|MODIFIER|TRBV2|TRBV2|Transcript|unassigned_transcript_1325|V_gene_segment|||||||||||2024|1||||chm13v2.0_RefSeq_Liftoff_v5.2.nochr.tab.gff3.bgz|	GT	0|0	0|1	0|0	1|0	0|0
+7	143614092	chr7-143614093-INS-8	T	TACGATGC	.	.	ID=chr7-143614093-INS-8;VARTYPE=INDEL;SVTYPE=INS;SVLEN=8;CSQ=ACGATGC|frameshift_variant|HIGH|TRBV1|TRBV1|Transcript|unassigned_transcript_1324|V_gene_segment|1/2||||13-14|13-14|5|L/HDAX|ctc/cACGATGCtc|||1||||chm13v2.0_RefSeq_Liftoff_v5.2.nochr.tab.gff3.bgz|,ACGATGC|upstream_gene_variant|MODIFIER|TRBV2|TRBV2|Transcript|unassigned_transcript_1325|V_gene_segment|||||||||||1985|1||||chm13v2.0_RefSeq_Liftoff_v5.2.nochr.tab.gff3.bgz|	GT	0|1	0|0	0|1	0|0	0|0
+7	143614100	chr7-143614101-DEL-12	CTAGCTAGGATC	C	.	.	ID=chr7-143614101-DEL-12;VARTYPE=INDEL;SVTYPE=DEL;SVLEN=-12;CSQ=-|frameshift_variant|HIGH|TRBV1|TRBV1|Transcript|unassigned_transcript_1324|V_gene_segment|1/2||||22-32|22-32|8-11|GVVH/X|GGTGTGGTCCAt/t|||1||||chm13v2.0_RefSeq_Liftoff_v5.2.nochr.tab.gff3.bgz|,-|upstream_gene_variant|MODIFIER|TRBV2|TRBV2|Transcript|unassigned_transcript_1325|V_gene_segment|||||||||||1967|1||||chm13v2.0_RefSeq_Liftoff_v5.2.nochr.tab.gff3.bgz|	GT	0|0	0|1	0|0	1|0	0|0
+7	143614145	chr7-143614146-INS-6	G	GATCGA	.	.	ID=chr7-143614146-INS-6;VARTYPE=INDEL;SVTYPE=INS;SVLEN=6;CSQ=ATCGA|intron_variant|MODIFIER|TRBV1|TRBV1|Transcript|unassigned_transcript_1324|V_gene_segment||1/1||||||||||1||||chm13v2.0_RefSeq_Liftoff_v5.2.nochr.tab.gff3.bgz|,ATCGA|upstream_gene_variant|MODIFIER|TRBV2|TRBV2|Transcript|unassigned_transcript_1325|V_gene_segment|||||||||||1932|1||||chm13v2.0_RefSeq_Liftoff_v5.2.nochr.tab.gff3.bgz|	GT	1|0	0|0	0|0	0|1	0|0
+7	143614194	chr7-143614195-DEL-7	T	TACGCTA	.	.	ID=chr7-143614195-DEL-7;VARTYPE=INDEL;SVTYPE=DEL;SVLEN=-7;CSQ=ACGCTA|intron_variant|MODIFIER|TRBV1|TRBV1|Transcript|unassigned_transcript_1324|V_gene_segment||1/1||||||||||1||||chm13v2.0_RefSeq_Liftoff_v5.2.nochr.tab.gff3.bgz|,ACGCTA|upstream_gene_variant|MODIFIER|TRBV2|TRBV2|Transcript|unassigned_transcript_1325|V_gene_segment|||||||||||1883|1||||chm13v2.0_RefSeq_Liftoff_v5.2.nochr.tab.gff3.bgz|	GT	0|1	0|0	0|1	0|0	0|0
+7	143614260	chr7-143614261-INS-9	T	TACGATGCT	.	.	ID=chr7-143614261-INS-9;VARTYPE=INDEL;SVTYPE=INS;SVLEN=9;CSQ=ACGATGCT|frameshift_variant|HIGH|TRBV1|TRBV1|Transcript|unassigned_transcript_1324|V_gene_segment|2/2||||64-65|64-65|22|P/HDAX|cca/cACGATGCTca|||1||||chm13v2.0_RefSeq_Liftoff_v5.2.nochr.tab.gff3.bgz|,ACGATGCT|upstream_gene_variant|MODIFIER|TRBV2|TRBV2|Transcript|unassigned_transcript_1325|V_gene_segment|||||||||||1817|1||||chm13v2.0_RefSeq_Liftoff_v5.2.nochr.tab.gff3.bgz|	GT	0|0	1|0	0|0	0|1	0|0

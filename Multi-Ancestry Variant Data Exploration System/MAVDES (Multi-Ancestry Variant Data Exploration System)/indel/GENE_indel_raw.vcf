@@ -1,0 +1,18 @@
+##fileformat=VCFv4.2
+##fileDate=20251212
+##source=Simulated
+##reference=file://hs1.fa.gz
+##note=These are simulated, fake variants for demonstration purposes only
+##contig=<ID=chr7,length=160567428>
+##INFO=<ID=ID,Number=A,Type=String,Description="ID of merged variant set">
+##INFO=<ID=VARTYPE,Number=A,Type=String,Description="Variant class">
+##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Variant type">
+##INFO=<ID=SVLEN,Number=1,Type=Integer,Description="Variant length">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	S1	S2	S3	S4	S5
+chr7	143614050	chr7-143614051-DEL-5	AAGTA	A	.	.	ID=chr7-143614051-DEL-5;VARTYPE=INDEL;SVTYPE=DEL;SVLEN=-5	GT	0|0	0|1	0|0	1|0	0|0
+chr7	143614092	chr7-143614093-INS-8	T	TACGATGC	.	.	ID=chr7-143614093-INS-8;VARTYPE=INDEL;SVTYPE=INS;SVLEN=8	GT	0|1	0|0	0|1	0|0	0|0
+chr7	143614100	chr7-143614101-DEL-12	CTAGCTAGGATC	C	.	.	ID=chr7-143614101-DEL-12;VARTYPE=INDEL;SVTYPE=DEL;SVLEN=-12	GT	0|0	0|1	0|0	1|0	0|0
+chr7	143614145	chr7-143614146-INS-6	G	GATCGA	.	.	ID=chr7-143614146-INS-6;VARTYPE=INDEL;SVTYPE=INS;SVLEN=6	GT	1|0	0|0	0|0	0|1	0|0
+chr7	143614194	chr7-143614195-DEL-7	T	TACGCTA	.	.	ID=chr7-143614195-DEL-7;VARTYPE=INDEL;SVTYPE=DEL;SVLEN=-7	GT	0|1	0|0	0|1	0|0	0|0
+chr7	143614260	chr7-143614261-INS-9	T	TACGATGCT	.	.	ID=chr7-143614261-INS-9;VARTYPE=INDEL;SVTYPE=INS;SVLEN=9	GT	0|0	1|0	0|0	0|1	0|0

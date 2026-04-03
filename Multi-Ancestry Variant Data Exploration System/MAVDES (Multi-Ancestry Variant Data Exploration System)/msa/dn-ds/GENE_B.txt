@@ -1,0 +1,9 @@
+,GENE2_Hsa,GENE2_speciesA,GENE2_speciesB,GENE2_speciesC,GENE2_2_speciesA,GENE2−2_speciesB,GENE2-a_speciesC
+GENE2_Hsa,0,0.6,0.8,1.2,1.0,1.5,0.9
+GENE2_speciesA,0.006,0,0.7,1.1,0.9,1.4,0.8
+GENE2_speciesB,0.005,0.007,0,1.0,0.8,1.3,1.0
+GENE2_speciesC,0.009,0.010,0.008,0,1.3,1.6,1.2
+GENE2_2_speciesA,0.013,0.016,0.014,0.012,0,1.7,1.4
+GENE2−2_speciesB,0.004,0.005,0.006,0.007,0.005,0,1.8
+GENE2-a_speciesC,0.010,0.011,0.008,0.013,0.011,0.009,0
+
