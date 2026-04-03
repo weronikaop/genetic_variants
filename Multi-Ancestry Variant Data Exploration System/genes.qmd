@@ -1,0 +1,726 @@
+---
+title: "Unique genes"
+format: html
+editor: visual
+author: 
+- Weronika Oprzędek
+---
+
+## Libraries
+
+```{r}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(tibble)
+  library(ggplot2)
+  library(ggrepel)
+  library(pheatmap)
+  library(optparse)
+  library(readr)
+  library(purrr)
+  library(writexl)
+  library(readxl)
+})
+```
+
+# 1. unique genes
+
+```{r}
+plot_genes <- function(core_metrics, gene_name, segment = "all", output_dir,
+    z_cutoff_uni = 2.5, z_cutoff_multi = 2.0, dist_quantile = 0.9){
+
+  # assign segment type from gene name
+  core_metrics <- core_metrics %>%
+    mutate(segment_type = substr(gene, 4, 4))
+
+  # optional filtering by segment
+  if (segment != "all") {
+    core_metrics <- core_metrics %>%
+      filter(segment_type == segment)
+  }
+
+  segment_label <- ifelse(segment == "all", "all segments", 
+                          paste(segment, "segments"))
+
+  # build analysis matrix (gene-level features only)
+  core_matrix <- core_metrics %>%
+    column_to_rownames("gene") %>%
+    mutate(
+      # impute missing values with median of column
+      mean_dnds = ifelse(is.na(mean_dnds),
+                         median(mean_dnds, na.rm = TRUE), mean_dnds),
+      mean_distance = ifelse(is.na(mean_distance), 
+                             median(mean_distance, na.rm = TRUE), mean_distance)
+    ) %>%
+    select(snv_rate, indel_rate, sv_rate, total_contribution_len,
+           mean_dnds, mean_distance, var_allele_count,
+           diversity, var_diversity)
+
+  # remove features with no variance
+  sd_vec <- apply(core_matrix, 2, sd, na.rm = TRUE)
+  core_matrix <- core_matrix[, sd_vec > 0]
+
+  # stop early if not enough data for multivariate analysis
+  if (ncol(core_matrix) < 2 || nrow(core_matrix) < 3) {
+    msg <- paste0(gene_name, " ", segment,
+                  ": too few data for multivariate analysis. ")
+    if (ncol(core_matrix) < 2) msg <- paste0(msg, "Number of metrics = ", ncol(core_matrix), ". ")
+    if (nrow(core_matrix) < 3) msg <- paste0(msg, "Number of genes = ", nrow(core_matrix), ".")
+    warning(msg)
+    return(NULL)
+  }
+
+  # standardize features for PCA + distance analysis
+  core_scaled <- scale(core_matrix)
+
+  # 1. Univariate outliers
+  z_scores <- as.data.frame(core_scaled)
+  z_scores$gene <- rownames(core_scaled)
+
+  outliers_univariate <- z_scores %>%
+    pivot_longer(-gene, names_to = "metric", values_to = "z") %>%
+    filter(abs(z) >= z_cutoff_uni) %>%
+    arrange(desc(abs(z)))
+
+  # 2. PCA decomposition
+  pca <- prcomp(core_scaled, center = FALSE, scale. = FALSE)
+
+  pca_scores <- as.data.frame(pca$x)
+  pca_scores$gene <- rownames(pca_scores)
+
+  # 3. Distance-based outliers
+  dist_mat <- dist(core_scaled)
+  dist_mean <- rowMeans(as.matrix(dist_mat))
+  dist_z <- scale(dist_mean)[,1]
+
+  distance_outliers <- tibble(
+    gene = names(dist_mean),
+    mean_feature_distance = dist_mean,
+    z = dist_z
+  ) %>%
+    filter(
+      mean_feature_distance >= quantile(mean_feature_distance, dist_quantile) &
+      z >= z_cutoff_multi
+    )
+
+  # 4. Univariate summary per gene
+  uni_max <- z_scores %>%
+    pivot_longer(-gene, names_to = "metric", values_to = "z") %>%
+    group_by(gene) %>%
+    summarise(max_abs_z = max(abs(z)), .groups = "drop") %>%
+    mutate(is_univariate = max_abs_z >= z_cutoff_uni)
+
+  n_genes <- length(dist_mean)
+  use_quantile <- n_genes >= 10
+
+  # distance threshold logic
+  dist_thr <- if (use_quantile) {
+    quantile(dist_mean, dist_quantile)
+  } else {
+    -Inf
+  }
+
+  dist_df <- tibble(
+    gene = names(dist_mean),
+    mean_feature_distance = dist_mean,
+    z_distance = scale(dist_mean)[,1]
+  ) %>%
+    mutate(
+      percentile = ecdf(mean_feature_distance)(mean_feature_distance),
+      quantile_used = use_quantile,
+      is_quantile_outlier = mean_feature_distance >= dist_thr,
+      is_z_outlier = z_distance >= z_cutoff_multi,
+      is_multivariate = is_z_outlier & is_quantile_outlier
+    )
+
+  # 5. Combine all outlier definitions
+  all_genes <- tibble(gene = rownames(core_scaled)) %>%
+    left_join(uni_max, by = "gene") %>%
+    left_join(
+      dist_df %>% select(gene, mean_feature_distance, z_distance, percentile, is_multivariate),
+      by = "gene"
+    ) %>%
+    mutate(
+      outlier_type = case_when(
+        is_univariate & is_multivariate ~ "Multi",
+        is_univariate ~ "Uni",
+        is_multivariate ~ "Multi",
+        TRUE ~ "None"
+      )
+    )
+
+  # prepare output tables directory
+  out_tbl_dir <- file.path(output_dir, "tables")
+  if (!dir.exists(out_tbl_dir)) dir.create(out_tbl_dir, recursive = TRUE)
+
+  # format table for export
+  gene_table <- all_genes %>%
+    mutate(
+      is_univariate = ifelse(is_univariate, "Yes", "No"),
+      is_multivariate = ifelse(is_multivariate, "Yes", "No")
+    ) %>%
+    dplyr::rename(
+      max_absolute_z_score = max_abs_z,
+      mean_multivariate_distance = mean_feature_distance,
+      distance_z_score = z_distance,
+      distance_percentile = percentile,
+      univariate_outlier = is_univariate,
+      multivariate_outlier = is_multivariate
+    )
+
+  # summary statistics
+  summary_tbl <- gene_table %>%
+    summarise(
+      total_genes = n(),
+      total_univariate_outliers = sum(univariate_outlier == "Yes"),
+      total_multivariate_outliers = sum(multivariate_outlier == "Yes"),
+      total_any_outliers = sum(outlier_type != "None")
+    )
+
+  print(summary_tbl)
+
+  # export results to Excel
+  sheets <- list(
+    genes = gene_table,
+    summary = summary_tbl
+  )
+
+  write_xlsx(
+    sheets,
+    file.path(out_tbl_dir,
+              paste0(gene_name, "_", segment, "_outliers_tables.xlsx"))
+  )
+
+  # genes flagged as interesting
+  interesting_genes <- all_genes %>%
+    filter(outlier_type != "None") %>%
+    select(gene)
+
+  # 6. Output directories
+  fig_dir <- file.path(output_dir, "graphs", "genes")
+  if (!dir.exists(fig_dir)) dir.create(fig_dir, recursive = TRUE)
+
+  # 7. Plot labels
+  metric_labels <- c(
+    snv_rate = "SNV rate",
+    indel_rate = "INDEL rate",
+    sv_rate = "SV rate",
+    total_contribution_len = "Variability",
+    mean_dnds = "Mean dN-dS",
+    mean_distance = "Mean distance",
+    var_allele_count = "Allele var",
+    diversity = "Haplo div",
+    var_diversity = "Haplo div region"
+  )
+
+  # 8. Heatmap
+
+  # symmetric color scaling around zero
+  max_abs <- max(abs(core_scaled), na.rm = TRUE)
+  breaks <- seq(-max_abs, max_abs, length.out = 101)
+
+  n_genes <- nrow(core_scaled)
+
+  # adjust heatmap cell size based on number of genes
+  cell_h <- ifelse(
+    n_genes <= 30, 12,
+    ifelse(n_genes <= 60, 9.5, 7)
+  )
+
+  colnames(core_scaled) <- metric_labels[colnames(core_scaled)]
+
+  # annotation for heatmap rows
+  row_annotation <- data.frame(
+    Outlier = factor(
+      all_genes$outlier_type[match(rownames(core_scaled), all_genes$gene)],
+      levels = c("None", "Uni", "Multi")
+    )
+  )
+  rownames(row_annotation) <- rownames(core_scaled)
+
+  ann_colors <- list(
+    Outlier = c(
+      None = "#F0F0F0",
+      Uni = "#E69F00",
+      Multi = "#009E73"
+    )
+  )
+
+  # heatmap output
+  pheatmap(
+    core_scaled,
+    clustering_method = "ward.D2",
+    labels_row = rownames(core_scaled),
+    annotation_row = row_annotation,
+    annotation_colors = ann_colors,
+    angle_col = 45,
+    fontsize_col = 8,
+    fontsize_row = 8,
+    cellheight = cell_h,
+    color = colorRampPalette(c("#2c7bb6", "white", "#d7191c"))(100),
+    breaks = breaks,
+    main = paste(gene_name, segment, "gene variation landscape"),
+    filename = file.path(fig_dir, paste0(gene_name, "_", segment, "_heatmap.png")),
+    width = 6
+  )
+
+  # 9. PCA plot
+  pca_var <- pca$sdev^2 / sum(pca$sdev^2)
+  pc1_var <- round(pca_var[1] * 100, 1)
+  pc2_var <- round(pca_var[2] * 100, 1)
+
+  p_pca <- ggplot(pca_scores, aes(PC1, PC2)) +
+    geom_point(color = "grey70", alpha = 0.6, size = 2) +
+    geom_point(data = pca_scores %>% filter(gene %in% interesting_genes$gene),
+               color = "#d7191c", size = 2) +
+    geom_text_repel(data = pca_scores %>% filter(gene %in% interesting_genes$gene),
+                    aes(label = gene), size = 2,
+                    box.padding = 0.3, point.padding = 0.25,
+                    segment.color = "grey60") +
+    theme_classic(base_size = 13) +
+    labs(
+      title = paste("PCA of gene-level metrics:", gene_name),
+      subtitle = paste("Segment:", segment,
+                       "| Z-cutoff univariate:", z_cutoff_uni,
+                       "| Z-cutoff multivariate:", z_cutoff_multi,
+                       "| Dist-quantile:", dist_quantile),
+      x = paste0("PC1 (Explained variance: ", pc1_var, "%)"),
+      y = paste0("PC2 (Explained variance: ", pc2_var, "%)")
+    )
+
+  ggsave(file.path(fig_dir, paste0(gene_name, "_", segment, "_PCA.png")),
+         p_pca, width = 6, height = 5)
+
+  # 10. Univariate outlier plot
+  if (nrow(outliers_univariate) > 0) {
+
+    outliers_univariate <- outliers_univariate %>%
+      mutate(metric_label = metric_labels[metric]) %>%
+      group_by(metric_label) %>%
+      mutate(x_jitter = runif(n(), -0.2, 0.2)) %>%
+      ungroup()
+
+    p_uni <- ggplot(outliers_univariate, aes(x = x_jitter, y = z)) +
+      geom_point(alpha = 0.7, color = "#d7191c", size = 2) +
+      geom_text_repel(aes(label = gene),
+                      size = 2, max.overlaps = 50,
+                      box.padding = 0.3, point.padding = 0.2) +
+      facet_wrap(~ metric_label, scales = "free_x", ncol = 3) +
+      theme_classic(base_size = 12) +
+      geom_hline(yintercept = c(-z_cutoff_uni, z_cutoff_uni),
+                 linetype = "dashed", color = "grey40") +
+      labs(
+        title = paste("Univariate outliers:", gene_name),
+        subtitle = paste("Segment:", segment, "| Z-cutoff:", z_cutoff_uni),
+        y = "Z-score",
+        x = NULL
+      ) +
+      theme(
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        strip.text = element_text(size = 10, face = "bold")
+      )
+
+    ggsave(
+      file.path(fig_dir, paste0(gene_name, "_", segment, "_univariate.png")),
+      p_uni,
+      width = 7,
+      height = 5
+    )
+
+  } else {
+    message(paste(
+      gene_name, segment,
+      ": no univariate outliers detected (z >", z_cutoff_uni, ")"
+    ))
+  }
+
+  # return results for downstream use
+  return(list(
+    interesting_genes = interesting_genes,
+    univariate_outliers = outliers_univariate,
+    pca = pca,
+    distance_outliers = distance_outliers,
+    core_matrix = core_matrix
+  ))
+}
+```
+
+# 2. comparison of metrics
+
+```{r}
+# Prepare data for conservation analysis
+prepare_conservation_data <- function(complete_data) {
+  complete_data <- complete_data %>%
+    mutate(
+      z_score = scale(total_contribution_len),
+      z_dnds = scale(mean_dnds),
+      z_dist = scale(mean_distance)
+    )
+  
+  complete_data <- complete_data %>%
+    mutate(
+      # Categorize genes based on quantiles
+      human_var_level = case_when(
+        total_contribution_len >= quantile(total_contribution_len, 0.66, na.rm = TRUE) ~ "var",
+        total_contribution_len <= quantile(total_contribution_len, 0.33, na.rm = TRUE) ~ "cons",
+        TRUE ~ "mid"
+      ),
+      # Squeezed z-scores for plotting
+      z_score_squeezed = atan(z_score) / (pi / 2)
+    )
+  
+  complete_data <- complete_data %>%
+    filter(!(is.na(z_dnds) & is.na(z_dist))) %>%
+    mutate(
+      z_evo_raw = rowMeans(cbind(z_dnds, z_dist), na.rm = TRUE),
+      z_evo_composite = atan(z_evo_raw) / (pi / 2),
+      evo_composite_level = case_when(
+        z_evo_composite >= quantile(z_evo_composite, 0.66, na.rm = TRUE) ~ "var",
+        z_evo_composite <= quantile(z_evo_composite, 0.33, na.rm = TRUE) ~ "cons",
+        TRUE ~ "mid"
+      ),
+      joint_class = case_when(
+        human_var_level == "var"  & evo_composite_level == "var"  ~ "Human↑ Evo↑",
+        human_var_level == "cons" & evo_composite_level == "cons" ~ "Human↓ Evo↓",
+        human_var_level == "var"  & evo_composite_level == "cons" ~ "Human↑ Evo↓",
+        human_var_level == "cons" & evo_composite_level == "var"  ~ "Human↓ Evo↑",
+        TRUE ~ "Intermediate"
+      )
+    )
+  return(complete_data)
+}
+```
+
+### plot
+
+```{r}
+plot_composite_conservation_all_loci <- function(
+  complete_data,
+  output_dir = "part2/graphs/compare/"
+) {
+
+  if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+  
+  locus_colors_vis <- c(
+    TRA = "#C00000",  # dark red
+    TRB = "#8B6508",  # dark gold/brown
+    IGH = "#006030",  # dark green
+    IGK = "#5F3FBF",  # dark purple
+    IGL = "#2F70B3"   # dark blue
+  )
+
+  p <- ggplot(
+    complete_data,
+    aes(
+      x = z_evo_composite,
+      y = z_score_squeezed,
+      color = locus,
+      shape = joint_class
+    )
+  ) +
+    geom_point(alpha = 0.75, size = 2) +
+    geom_text_repel(
+      data = complete_data,
+      aes(label = gene),
+      size = 2.2,
+      max.overlaps = Inf
+    ) +
+    theme_minimal(base_size = 11) +
+    labs(
+      x = "Evolutionary variability (squeezed composite z-score)",
+      y = "Human population variability (squeezed z-score)",
+      color = "Locus",
+      title = "Composite evolutionary vs human population variability across antigen receptor loci",
+      shape = "Human vs evolutionary\nvariability level"
+    ) +
+    scale_color_manual(values = locus_colors_vis) +
+    scale_shape_manual(values = c(
+      "Human↑ Evo↑"  = 16,  # filled circle
+      "Human↓ Evo↓"  = 17,  # triangle
+      "Human↑ Evo↓"  = 15,  # square
+      "Human↓ Evo↑"  = 18,  # diamond
+      "Intermediate" = 1    # open circle
+    )) +
+    theme(
+      legend.position = "top",
+      legend.direction = "horizontal",
+      legend.title = element_text(face = "bold"),
+      legend.text = element_text(size = 10),
+      plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+      axis.title = element_text(face = "bold", size = 12)
+    )
+
+  ggsave(
+    file.path(output_dir, "all_loci_composite_evolutionary_variability.png"),
+    p,
+    width = 14,
+    height = 11,
+    dpi = 300,
+    limitsize = FALSE
+  )
+
+  print(p)
+}
+```
+
+# 0. Set up
+
+```{r}
+#Argument parser with help
+option_list <- list(
+  make_option(c("-g","--gene"), type="character", default="IGL",
+              help="Gene name, e.g. TRB"),
+  
+  make_option(c("-i","--input_dir"), type="character", default="part2",
+              help=paste(
+                "Input folder path. Expected structure:",
+                "\n  tables/<GENE>.xlsx       -- gene level metrics",
+                sep="\n")),
+  
+  make_option(c("-o","--output_dir"), type="character", default="part2",
+              help="Output folder path")
+)
+
+opt_parser <- OptionParser(option_list = option_list)
+
+#Parse arguments
+args <- if (interactive()) character(0) else commandArgs(trailingOnly = TRUE)
+opt <- parse_args(opt_parser, args = args)
+
+#Extract variables
+gene_name <- opt$gene
+input_dir <- opt$input_dir
+output_dir <- opt$output_dir
+
+
+#Print summary
+cat("Gene:", gene_name, "\n")
+cat("Input dir:", input_dir, "\n")
+cat("Output dir:", output_dir, "\n")
+```
+
+# 1. unique genes
+
+## Data processing
+
+```{r}
+in_tbl_dir <- file.path(input_dir, "tables")
+all_gene_metrics <- read_csv(
+  file.path(in_tbl_dir, paste0(gene_name, "_all_gene_metrics.csv"))
+)
+
+if (!is.null(all_gene_metrics) && nrow(all_gene_metrics) > 0){
+  # Replace missing haplotype-related values with zeros
+  all_gene_metrics <- all_gene_metrics %>%
+    mutate(
+      n_haplotypes        = replace_na(n_haplotypes, 0),
+      diversity           = replace_na(diversity, 0)
+    )
+  
+  all_gene_metrics_clean <- all_gene_metrics %>%
+    dplyr::rename(
+      gene_id = gene,
+      
+      gene_start_bp = Start,
+      gene_end_bp = End,
+      
+      variant_impact_score = total_contribution,
+      variant_impact_score_per_bp = total_contribution_len,
+      
+      n_unique_variants = n_variants,
+      n_haplotype_instances = n_samples,
+      
+      n_snv_variants = SNV,
+      n_indel_variants = INDEL,
+      n_sv_variants = SV,
+      
+      snv_rate_per_bp = snv_rate,
+      indel_rate_per_bp = indel_rate,
+      sv_rate_per_bp = sv_rate,
+      
+      mean_pairwise_distance_to_homologs = mean_distance,
+      median_pairwise_distance_to_homologs = median_distance,
+      
+      mean_dN_dS_to_homologs = mean_dnds,
+      median_dN_dS_to_homologs = median_dnds,
+      
+      n_reference_genes_matched = n_compared,
+      matched_reference_genes = matched_genes,
+      
+      total_unique_haplotypes_across_regions = n_haplotypes,
+      
+      regional_haplotype_shannon_diversity = diversity,
+      
+      sd_allele_count = sd_allele_count,
+      var_allele_count = var_allele_count,
+      max_allele_count = max_allele_count,
+      min_allele_count = min_allele_count,
+      mean_allele_count = mean_allele_count,
+      
+      mean_shannon_diversity_across_regions = mean_diversity,
+      sd_shannon_diversity_across_regions = sd_diversity,
+      var_shannon_diversity_across_regions = var_diversity,
+      
+      fraction_regions_with_haplotypes = fraction_regions_with_variants
+    )
+  
+  out_tbl_dir <- file.path(output_dir, "tables")
+  if (!dir.exists(out_tbl_dir)) dir.create(out_tbl_dir, recursive = TRUE)
+  
+  write_xlsx(
+    list(all_gene_metrics = all_gene_metrics_clean),
+    file.path(out_tbl_dir, paste0(gene_name, "_metrics.xlsx"))
+  )
+
+  # Define final core metric set for downstream analyses
+  core_metrics <- all_gene_metrics %>%
+    select(
+      gene,
+      
+      #mutational burden
+      snv_rate,
+      indel_rate,
+      sv_rate,
+      total_contribution_len,
+      
+      #evolutionary metrics
+      mean_dnds,
+      mean_distance, # <- correlated (0.66) with mean_dnds but different sets of NA
+      
+      #allelic structure
+      var_allele_count,
+      
+      #haplotype structural complexity
+      diversity,
+      
+      #regional distribution of variation
+      var_diversity
+    )
+  
+  # Compute pairwise correlations between all numeric gene-level metrics
+  cor_long_unique <- cor(core_metrics %>% select(where(is.numeric)),
+    use = "pairwise.complete.obs") %>%
+    as.data.frame() %>%
+    rownames_to_column("metric_1") %>%
+    pivot_longer(cols = -metric_1, names_to  = "metric_2", 
+                 values_to = "correlation") %>%
+    filter(metric_1 < metric_2)   #remove self-correlations and duplicates
+
+  # Extract strongly correlated metric pairs
+  cor_threshold <- 0.7
+
+  cor_strong <- cor_long_unique %>%
+    filter(abs(correlation) >= cor_threshold) %>%
+    arrange(desc(abs(correlation)))
+}
+```
+
+## unique genes
+
+```{r}
+# all segments
+#plot_genes(core_metrics, gene_name, "all", output_dir)
+
+#V
+plot_genes(core_metrics, gene_name, "V", output_dir)
+
+#J
+plot_genes(core_metrics, gene_name, "J", output_dir)
+```
+
+# Create xlsx tables
+
+## outliers
+
+```{r}
+#| eval: false
+#| include: true
+
+files <- list.files("part2/tables/", pattern = "_outliers_tables.xlsx", full.names = TRUE)
+
+gene_tables <- lapply(files, function(f){
+  read_xlsx(f, sheet = "genes")
+})
+
+names(gene_tables) <- gsub("_outliers_tables.xlsx", "", basename(files))
+
+summary_tables <- lapply(files, function(f){
+  
+  seg <- gsub("_outliers_tables.xlsx", "", basename(f))
+  
+  read_xlsx(f, sheet = "summary") %>%
+    mutate(dataset = seg)
+})
+
+summary_all <- bind_rows(summary_tables)
+
+summary_total <- summary_all %>%
+  summarise(
+    dataset = "ALL",
+    total_genes = sum(total_genes),
+    total_univariate_outliers = sum(total_univariate_outliers),
+    total_multivariate_outliers = sum(total_multivariate_outliers),
+    total_any_outliers = sum(total_any_outliers)
+  )
+
+summary_all <- bind_rows(summary_all, summary_total)
+
+summary_J <- summary_all %>%
+  filter(grepl("_J$", dataset)) %>%
+  summarise(
+    total_genes = sum(total_genes),
+    total_univariate_outliers = sum(total_univariate_outliers),
+    total_multivariate_outliers = sum(total_multivariate_outliers),
+    total_any_outliers = sum(total_any_outliers)
+  ) %>%
+  mutate(dataset = "ALL_J")
+
+summary_V <- summary_all %>%
+  filter(grepl("_V$", dataset)) %>%
+  summarise(
+    total_genes = sum(total_genes),
+    total_univariate_outliers = sum(total_univariate_outliers),
+    total_multivariate_outliers = sum(total_multivariate_outliers),
+    total_any_outliers = sum(total_any_outliers)
+  ) %>%
+  mutate(dataset = "ALL_V")
+
+summary_all <- bind_rows(summary_all, summary_J, summary_V)
+
+summary_all <- summary_all %>%
+  mutate(
+    percentage_univariate = round(100 * total_univariate_outliers / total_genes, 1),
+    percentage_multivariate = round(100 * total_multivariate_outliers / total_genes, 1)
+  )
+
+sheets <- c(
+  list(summary = summary_all),
+  gene_tables
+)
+
+write_xlsx(
+  sheets,
+  "part2/tables/outliers.xlsx"
+)
+
+```
+
+## all metrics
+
+```{r}
+#| eval: false
+#| include: true
+
+files <- list.files("part2/tables/", pattern = "_metrics.xlsx", full.names = TRUE)
+
+metrics <- lapply(files, function(f){read_xlsx(f)})
+
+names(metrics) <- gsub("_metrics.xlsx", "", basename(files))
+
+write_xlsx(
+  metrics,
+  "part2/tables/metrics.xlsx"
+)
+```
